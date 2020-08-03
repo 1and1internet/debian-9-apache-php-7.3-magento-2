@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+echo "TEST1"
+
+touch /tmp/test1

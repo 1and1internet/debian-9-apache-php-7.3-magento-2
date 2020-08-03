@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+
+INSTALL_IN_PROGRESS=/var/www/html/.installation_in_progress
+
+function run_apache2_installation_page {
+    cp -r /usr/local/magento2/installing /var/www/html/installing
+    source /etc/apache2/envvars
+    export DOCUMENT_ROOT=html/installing
+    /usr/sbin/apache2 -DFOREGROUND &
+}
+
+function stop_apache2_installation_page {
+    apachectl -k graceful-stop
+    rm -rf /var/www/html/installing
+}
+
+function shouldinstall {
+    # Running without a database would just error, but we need to
+    # be able to do this for drone
+    [ -z $SKIPINSTALL ] || [ $SKIPINSTALL != "true" ] || return 1
+    return 0
+}
+
+function stillnotinstalled {
+    [ ! -f /var/www/html/magento2/app/etc/env.php ] && [ ! -f /var/www/html/magento2/app/etc/config.php ] && return 0
+    return 1
+}
+
+function attempt_magento_setup_install {
+    echo "INSTALLING MAGENTO"
+    echo
+
+    cd /var/www/html/magento2
+    php bin/magento setup:install \
+        --backend-frontname $BACKEND_FRONTNAME \
+        --db-host $MAGENTO_DB_HOST \
+        --db-name $MAGENTO_DB_NAME \
+        --db-user $MAGENTO_DB_USER \
+        --db-password $MAGENTO_DB_PASSWORD \
+        --db-model mysql5 \
+        --session-save redis \
+        --session-save-redis-host $REDIS_HOST \
+        --session-save-redis-db 2 --session-save-redis-compression-threshold 2048 \
+        --session-save-redis-compression-lib gzip \
+        --session-save-redis-log-level 1 \
+        --session-save-redis-max-concurrency 6 \
+        --session-save-redis-break-after-frontend 5 \
+        --session-save-redis-break-after-adminhtml 30 \
+        --session-save-redis-first-lifetime 600 \
+        --session-save-redis-bot-first-lifetime 60 \
+        --session-save-redis-bot-lifetime 7200 \
+        --session-save-redis-disable-locking 0 \
+        --session-save-redis-min-lifetime 60 \
+        --session-save-redis-max-lifetime 2592000 \
+        --cache-backend redis \
+        --cache-backend-redis-server $REDIS_HOST \
+        --cache-backend-redis-db 0 \
+        --page-cache redis \
+        --page-cache-redis-server $REDIS_HOST \
+        --page-cache-redis-db 1 \
+        --page-cache-redis-compress-data 0 \
+        --language en_GB \
+        --timezone UTC \
+        --currency GBP \
+        --admin-user $MAGENTO_ADMIN_USER \
+        --admin-password $MAGENTO_ADMIN_PASSWORD \
+        --admin-email admin@example.com \
+        --admin-firstname AdminFirst \
+        --admin-lastname AdminLast \
+        --base-url $MAGENTO_BASE_URL
+
+        #--cleanup-database \
+        #--use-rewrites USE-REWRITES \
+        #--use-secure USE-SECURE \
+        #--base-url-secure BASE-URL-SECURE \
+        #--use-secure-admin USE-SECURE-ADMIN \
+        #--admin-use-security-key ADMIN-USE-SECURITY-KEY \
+        #--sales-order-increment-prefix SALES-ORDER-INCREMENT-PREFIX \
+        #--use-sample-data \
+        #-i|--interactive \
+        #--magento-init-params MAGENTO-INIT-PARAMS
+    REVAL=$?
+    cd -
+    return $REVAL
+}
+
+function magentonotinstalled {
+    [ $(ls -A /var/www/html/magento2/ | wc -l) == 0 ] || [ -f $INSTALL_IN_PROGRESS ] && return 0
+    return 1
+}
+
+function install_magento {
+    cd /var/www/html
+    if magentonotinstalled
+    then
+        shouldinstall && run_apache2_installation_page
+        echo "Unpacking latest magento2 into /var/www/html - this could take a while...."
+        tar zxf /tmp/magento2.tar.gz
+        touch $INSTALL_IN_PROGRESS
+
+        while shouldinstall && stillnotinstalled
+        do
+            attempt_magento_setup_install
+
+            if [ $? -ne 0 ]
+            then
+                # Maybe the database isn't ready?
+                echo "Failed install, sleep and retry"
+                sleep 10
+            fi
+        done
+        shouldinstall && stop_apache2_installation_page
+        rm $INSTALL_IN_PROGRESS
+    fi
+}
+
+install_magento
